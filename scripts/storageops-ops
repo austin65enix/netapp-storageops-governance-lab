@@ -1,0 +1,1518 @@
+#!/usr/bin/env python3
+
+from __future__ import annotations
+
+import argparse
+import fcntl
+import json
+import os
+import subprocess
+import sys
+import tempfile
+import uuid
+import urllib.error
+import urllib.parse
+import urllib.request
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+if str(REPOSITORY_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPOSITORY_ROOT))
+
+from services.scheduled_collection_operational_summary_service import (
+    read_scheduled_collection_operational_summary,
+)
+
+VERSION = "0.1.0"
+
+EXIT_SUCCESS = 0
+EXIT_SERVICE_UNAVAILABLE = 20
+EXIT_ENDPOINT_UNAVAILABLE = 30
+EXIT_DEPENDENCY_UNAVAILABLE = 40
+EXIT_METRIC_VALIDATION_FAILURE = 50
+EXIT_ALERT_VALIDATION_FAILURE = 60
+EXIT_EVIDENCE_WRITE_FAILURE = 70
+EXIT_LOCK_CONTENTION = 80
+EXIT_TIMEOUT = 90
+EXIT_UNEXPECTED = 100
+
+SERVICES = (
+    "storageops-mock-ontap",
+    "storageops-api",
+    "prometheus",
+    "grafana-server",
+)
+
+API_HEALTH_URL = "http://127.0.0.1:8100/healthz"
+CAPACITY_URL = "http://127.0.0.1:8100/api/storage/capacity"
+COLLECT_URL = "http://127.0.0.1:8100/api/inventory/collect"
+ONTAP_CLUSTER_URL = "http://127.0.0.1:8000/api/cluster"
+PROMETHEUS_QUERY_URL = "http://127.0.0.1:9090/api/v1/query"
+PROMETHEUS_ALERTS_URL = "http://127.0.0.1:9090/api/v1/alerts"
+
+DEFAULT_EVIDENCE_DIR = Path(
+    "evidence/m5/runtime"
+)
+
+DEFAULT_COLLECT_LOCK_FILE = Path(
+    "/run/lock/storageops-collect.lock"
+)
+
+CAPACITY_METRIC_QUERY = (
+    '100 * sum(storageops_capacity_bytes'
+    '{job="storageops-api",category="used"})'
+    ' / sum(storageops_capacity_bytes'
+    '{job="storageops-api",category="total"})'
+)
+
+
+def acquire_nonblocking_lock(
+    lock_file: Path,
+):
+    lock_file.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    handle = lock_file.open(
+        "a+",
+        encoding="utf-8",
+    )
+
+    try:
+        fcntl.flock(
+            handle.fileno(),
+            fcntl.LOCK_EX
+            | fcntl.LOCK_NB,
+        )
+    except BlockingIOError:
+        handle.close()
+        return None
+    except Exception:
+        handle.close()
+        raise
+
+    handle.seek(0)
+    handle.truncate()
+    handle.write(
+        f"pid={os.getpid()}\n"
+    )
+    handle.write(
+        f"acquired_at={utc_iso_timestamp()}\n"
+    )
+    handle.flush()
+    os.fsync(handle.fileno())
+
+    return handle
+
+
+def release_lock(handle) -> None:
+    if handle is None:
+        return
+
+    try:
+        fcntl.flock(
+            handle.fileno(),
+            fcntl.LOCK_UN,
+        )
+    finally:
+        handle.close()
+
+
+def utc_iso_timestamp() -> str:
+    return datetime.now(
+        timezone.utc
+    ).isoformat().replace("+00:00", "Z")
+
+
+def generate_execution_id(
+    command: str,
+) -> str:
+    suffix = uuid.uuid4().hex[:8]
+
+    return (
+        f"{command}-"
+        f"{utc_timestamp()}-"
+        f"{suffix}"
+    )
+
+
+def build_evidence_document(
+    *,
+    execution_id: str,
+    command: str,
+    started_at: str,
+    completed_at: str,
+    result: str,
+    exit_code: int,
+    data: dict[str, Any],
+    errors: list[str],
+    evidence_file: str,
+) -> dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "execution_id": execution_id,
+        "command": command,
+        "started_at": started_at,
+        "completed_at": completed_at,
+        "result": result,
+        "exit_code": exit_code,
+        "data": data,
+        "errors": errors,
+        "evidence_file": evidence_file,
+    }
+
+
+def write_evidence_atomic(
+    evidence_dir: Path,
+    execution_id: str,
+    document: dict[str, Any],
+) -> Path:
+    evidence_dir.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    final_path = evidence_dir / (
+        execution_id + ".json"
+    )
+
+    file_descriptor, temporary_name = tempfile.mkstemp(
+        prefix="."
+        + execution_id
+        + "-",
+        suffix=".tmp",
+        dir=evidence_dir,
+        text=True,
+    )
+
+    temporary_path = Path(temporary_name)
+
+    try:
+        with os.fdopen(
+            file_descriptor,
+            "w",
+            encoding="utf-8",
+        ) as handle:
+            json.dump(
+                document,
+                handle,
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            )
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+
+        os.replace(
+            temporary_path,
+            final_path,
+        )
+
+    except Exception:
+        try:
+            temporary_path.unlink(
+                missing_ok=True
+            )
+        finally:
+            raise
+
+    return final_path
+
+
+def utc_timestamp() -> str:
+    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+
+def git_revision() -> str | None:
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return None
+
+    return result.stdout.strip() or None
+
+
+def service_state(name: str) -> str:
+    try:
+        result = subprocess.run(
+            ["systemctl", "is-active", name],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError:
+        return "unknown"
+
+    return result.stdout.strip() or "unknown"
+
+
+def http_json(url: str, timeout: float) -> tuple[int, dict[str, Any]]:
+    request = urllib.request.Request(
+        url,
+        headers={"Accept": "application/json"},
+    )
+
+    try:
+        with urllib.request.urlopen(
+            request,
+            timeout=timeout,
+        ) as response:
+            status = int(response.status)
+            payload = json.loads(
+                response.read().decode("utf-8")
+            )
+            return status, payload
+    except urllib.error.HTTPError as exc:
+        try:
+            payload = json.loads(
+                exc.read().decode("utf-8")
+            )
+        except Exception:
+            payload = {}
+
+        return int(exc.code), payload
+
+
+def prometheus_query(
+    expression: str,
+    timeout: float,
+) -> tuple[int, dict[str, Any]]:
+    query = urllib.parse.urlencode(
+        {"query": expression}
+    )
+
+    return http_json(
+        f"{PROMETHEUS_QUERY_URL}?{query}",
+        timeout,
+    )
+
+
+def http_post_json(
+    url: str,
+    timeout: float,
+) -> tuple[int, dict[str, Any]]:
+    request = urllib.request.Request(
+        url,
+        data=b"",
+        method="POST",
+        headers={"Accept": "application/json"},
+    )
+
+    try:
+        with urllib.request.urlopen(
+            request,
+            timeout=timeout,
+        ) as response:
+            status = int(response.status)
+            payload = json.loads(
+                response.read().decode("utf-8")
+            )
+            return status, payload
+    except urllib.error.HTTPError as exc:
+        try:
+            payload = json.loads(
+                exc.read().decode("utf-8")
+            )
+        except Exception:
+            payload = {}
+
+        return int(exc.code), payload
+
+
+def emit_text(
+    command: str,
+    result: str,
+    exit_code: int,
+    data: dict[str, Any],
+    errors: list[str],
+    evidence_file: str | None = None,
+) -> None:
+    print(f"COMMAND={command}")
+    print(f"UTC_TIMESTAMP={utc_timestamp()}")
+
+    for key, value in data.items():
+        if isinstance(value, (dict, list)):
+            encoded = json.dumps(
+                value,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            print(f"{key}={encoded}")
+        else:
+            print(f"{key}={value}")
+
+    if evidence_file is not None:
+        print(f"evidence_file={evidence_file}")
+
+    for error in errors:
+        print(f"ERROR={error}")
+
+    print(f"RESULT={result}")
+    print(f"EXIT_CODE={exit_code}")
+
+
+def emit_json(
+    command: str,
+    result: str,
+    exit_code: int,
+    data: dict[str, Any],
+    errors: list[str],
+    evidence_file: str | None = None,
+    contract_version: str | None = None,
+) -> None:
+    payload = {
+        "command": command,
+        "timestamp": utc_iso_timestamp(),
+        "result": result,
+        "exit_code": exit_code,
+        "data": data,
+        "errors": errors,
+        "evidence_file": evidence_file,
+    }
+
+    if contract_version is not None:
+        payload["contract_version"] = contract_version
+
+    print(
+        json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    )
+
+
+def emit(
+    output_format: str,
+    command: str,
+    result: str,
+    exit_code: int,
+    data: dict[str, Any],
+    errors: list[str],
+    evidence_file: str | None = None,
+    contract_version: str | None = None,
+) -> None:
+    if output_format == "json":
+        emit_json(
+            command,
+            result,
+            exit_code,
+            data,
+            errors,
+            evidence_file,
+            contract_version,
+        )
+    else:
+        emit_text(
+            command,
+            result,
+            exit_code,
+            data,
+            errors,
+            evidence_file,
+        )
+
+
+def command_version(output_format: str) -> int:
+    data = {
+        "version": VERSION,
+        "git_revision": git_revision(),
+    }
+
+    emit(
+        output_format,
+        "version",
+        "PASS",
+        EXIT_SUCCESS,
+        data,
+        [],
+    )
+
+    return EXIT_SUCCESS
+
+
+def command_status(output_format: str) -> int:
+    states = {
+        service: service_state(service)
+        for service in SERVICES
+    }
+
+    unavailable = [
+        service
+        for service, state in states.items()
+        if state != "active"
+    ]
+
+    if unavailable:
+        errors = [
+            f"required service unavailable: {service}"
+            for service in unavailable
+        ]
+
+        emit(
+            output_format,
+            "status",
+            "FAIL",
+            EXIT_SERVICE_UNAVAILABLE,
+            states,
+            errors,
+        )
+
+        return EXIT_SERVICE_UNAVAILABLE
+
+    emit(
+        output_format,
+        "status",
+        "PASS",
+        EXIT_SUCCESS,
+        states,
+        [],
+    )
+
+    return EXIT_SUCCESS
+
+
+def command_health(
+    output_format: str,
+    timeout: float,
+) -> int:
+    data: dict[str, Any] = {}
+    errors: list[str] = []
+
+    try:
+        api_status, api_payload = http_json(
+            API_HEALTH_URL,
+            timeout,
+        )
+    except Exception as exc:
+        emit(
+            output_format,
+            "health",
+            "FAIL",
+            EXIT_ENDPOINT_UNAVAILABLE,
+            data,
+            [f"StorageOps health request failed: {exc}"],
+        )
+        return EXIT_ENDPOINT_UNAVAILABLE
+
+    data["storageops_health_http_status"] = api_status
+    data["storageops_health"] = api_payload
+
+    if api_status != 200:
+        emit(
+            output_format,
+            "health",
+            "FAIL",
+            EXIT_ENDPOINT_UNAVAILABLE,
+            data,
+            ["StorageOps health endpoint unavailable"],
+        )
+        return EXIT_ENDPOINT_UNAVAILABLE
+
+    try:
+        ontap_status, ontap_payload = http_json(
+            ONTAP_CLUSTER_URL,
+            timeout,
+        )
+    except Exception as exc:
+        emit(
+            output_format,
+            "health",
+            "FAIL",
+            EXIT_DEPENDENCY_UNAVAILABLE,
+            data,
+            [f"ONTAP cluster request failed: {exc}"],
+        )
+        return EXIT_DEPENDENCY_UNAVAILABLE
+
+    data["ontap_http_status"] = ontap_status
+    data["ontap_cluster"] = ontap_payload
+
+    if ontap_status != 200:
+        errors.append(
+            "ONTAP dependency endpoint unavailable"
+        )
+
+    if ontap_payload.get("state") != "online":
+        errors.append(
+            "ONTAP dependency state is not online"
+        )
+
+    if errors:
+        emit(
+            output_format,
+            "health",
+            "FAIL",
+            EXIT_DEPENDENCY_UNAVAILABLE,
+            data,
+            errors,
+        )
+        return EXIT_DEPENDENCY_UNAVAILABLE
+
+    emit(
+        output_format,
+        "health",
+        "PASS",
+        EXIT_SUCCESS,
+        data,
+        [],
+    )
+
+    return EXIT_SUCCESS
+
+
+def command_collect_unlocked(
+    output_format: str,
+    timeout: float,
+    evidence_dir: Path,
+    no_evidence: bool,
+) -> int:
+    execution_id = generate_execution_id(
+        "collect"
+    )
+    started_at = utc_iso_timestamp()
+
+    data: dict[str, Any] = {
+        "execution_id": execution_id,
+    }
+
+    def finish(
+        result: str,
+        exit_code: int,
+        errors: list[str],
+    ) -> int:
+        completed_at = utc_iso_timestamp()
+        evidence_file: str | None = None
+
+        data["started_at"] = started_at
+        data["completed_at"] = completed_at
+
+        if not no_evidence:
+            expected_path = (
+                evidence_dir
+                / f"{execution_id}.json"
+            )
+
+            document = build_evidence_document(
+                execution_id=execution_id,
+                command="collect",
+                started_at=started_at,
+                completed_at=completed_at,
+                result=result,
+                exit_code=exit_code,
+                data=data,
+                errors=errors,
+                evidence_file=str(expected_path),
+            )
+
+            try:
+                written_path = write_evidence_atomic(
+                    evidence_dir,
+                    execution_id,
+                    document,
+                )
+            except Exception as exc:
+                write_errors = [
+                    "evidence write failed: "
+                    f"{exc}"
+                ]
+
+                emit(
+                    output_format,
+                    "collect",
+                    "FAIL",
+                    EXIT_EVIDENCE_WRITE_FAILURE,
+                    data,
+                    write_errors,
+                    None,
+                )
+
+                return EXIT_EVIDENCE_WRITE_FAILURE
+
+            evidence_file = str(written_path)
+
+        emit(
+            output_format,
+            "collect",
+            result,
+            exit_code,
+            data,
+            errors,
+            evidence_file,
+        )
+
+        return exit_code
+
+    errors: list[str] = []
+
+    try:
+        http_status, payload = http_post_json(
+            COLLECT_URL,
+            timeout,
+        )
+    except TimeoutError as exc:
+        return finish(
+            "FAIL",
+            EXIT_TIMEOUT,
+            [
+                "inventory collection timed out: "
+                f"{exc}"
+            ],
+        )
+    except urllib.error.URLError as exc:
+        reason = getattr(exc, "reason", None)
+
+        if isinstance(reason, TimeoutError):
+            return finish(
+                "FAIL",
+                EXIT_TIMEOUT,
+                [
+                    "inventory collection timed out: "
+                    f"{exc}"
+                ],
+            )
+
+        return finish(
+            "FAIL",
+            EXIT_ENDPOINT_UNAVAILABLE,
+            [
+                "inventory collection request failed: "
+                f"{exc}"
+            ],
+        )
+    except Exception as exc:
+        return finish(
+            "FAIL",
+            EXIT_ENDPOINT_UNAVAILABLE,
+            [
+                "inventory collection request failed: "
+                f"{exc}"
+            ],
+        )
+
+    data["http_status"] = http_status
+    data["collection"] = payload
+
+    if http_status != 200:
+        errors.append(
+            f"inventory collection returned HTTP {http_status}"
+        )
+
+    if payload.get("status") != "collected":
+        errors.append(
+            "inventory collection status is not collected"
+        )
+
+    snapshot_file = payload.get("snapshot_file")
+
+    if not isinstance(snapshot_file, str) or not snapshot_file:
+        errors.append(
+            "inventory collection snapshot_file is missing"
+        )
+
+    resource_summary = payload.get("resource_summary")
+
+    if not isinstance(resource_summary, dict):
+        errors.append(
+            "inventory collection resource_summary is invalid"
+        )
+
+    change_count = payload.get("change_count")
+
+    if (
+        not isinstance(change_count, int)
+        or isinstance(change_count, bool)
+        or change_count < 0
+    ):
+        errors.append(
+            "inventory collection change_count is invalid"
+        )
+
+    if not isinstance(payload.get("changes"), list):
+        errors.append(
+            "inventory collection changes is invalid"
+        )
+
+    if errors:
+        return finish(
+            "FAIL",
+            EXIT_DEPENDENCY_UNAVAILABLE,
+            errors,
+        )
+
+    return finish(
+        "PASS",
+        EXIT_SUCCESS,
+        [],
+    )
+
+
+def command_collect(
+    output_format: str,
+    timeout: float,
+    evidence_dir: Path,
+    no_evidence: bool,
+    lock_file: Path = DEFAULT_COLLECT_LOCK_FILE,
+) -> int:
+    try:
+        lock_handle = acquire_nonblocking_lock(
+            lock_file
+        )
+    except Exception as exc:
+        emit(
+            output_format,
+            "collect",
+            "FAIL",
+            EXIT_UNEXPECTED,
+            {
+                "lock_file": str(lock_file),
+            },
+            [
+                "collection lock acquisition failed: "
+                f"{exc}"
+            ],
+        )
+        return EXIT_UNEXPECTED
+
+    if lock_handle is None:
+        execution_id = generate_execution_id(
+            "collect"
+        )
+        started_at = utc_iso_timestamp()
+        completed_at = utc_iso_timestamp()
+
+        data: dict[str, Any] = {
+            "execution_id": execution_id,
+            "started_at": started_at,
+            "completed_at": completed_at,
+            "lock_file": str(lock_file),
+        }
+
+        errors = [
+            "collection lock is already held: "
+            f"{lock_file}"
+        ]
+
+        evidence_file: str | None = None
+
+        if not no_evidence:
+            expected_path = (
+                evidence_dir
+                / f"{execution_id}.json"
+            )
+
+            document = build_evidence_document(
+                execution_id=execution_id,
+                command="collect",
+                started_at=started_at,
+                completed_at=completed_at,
+                result="FAIL",
+                exit_code=EXIT_LOCK_CONTENTION,
+                data=data,
+                errors=errors,
+                evidence_file=str(expected_path),
+            )
+
+            try:
+                written_path = write_evidence_atomic(
+                    evidence_dir,
+                    execution_id,
+                    document,
+                )
+            except Exception as exc:
+                emit(
+                    output_format,
+                    "collect",
+                    "FAIL",
+                    EXIT_EVIDENCE_WRITE_FAILURE,
+                    data,
+                    [
+                        "evidence write failed: "
+                        f"{exc}"
+                    ],
+                )
+                return EXIT_EVIDENCE_WRITE_FAILURE
+
+            evidence_file = str(written_path)
+
+        emit(
+            output_format,
+            "collect",
+            "FAIL",
+            EXIT_LOCK_CONTENTION,
+            data,
+            errors,
+            evidence_file,
+        )
+
+        return EXIT_LOCK_CONTENTION
+
+    try:
+        return command_collect_unlocked(
+            output_format,
+            timeout,
+            evidence_dir,
+            no_evidence,
+        )
+    finally:
+        release_lock(lock_handle)
+
+
+def command_capacity(
+    output_format: str,
+    timeout: float,
+) -> int:
+    data: dict[str, Any] = {}
+    errors: list[str] = []
+
+    try:
+        http_status, capacity = http_json(
+            CAPACITY_URL,
+            timeout,
+        )
+    except Exception as exc:
+        emit(
+            output_format,
+            "capacity",
+            "FAIL",
+            EXIT_ENDPOINT_UNAVAILABLE,
+            data,
+            [f"capacity request failed: {exc}"],
+        )
+        return EXIT_ENDPOINT_UNAVAILABLE
+
+    data["http_status"] = http_status
+    data["capacity"] = capacity
+
+    if http_status != 200:
+        emit(
+            output_format,
+            "capacity",
+            "FAIL",
+            EXIT_ENDPOINT_UNAVAILABLE,
+            data,
+            [f"capacity endpoint returned HTTP {http_status}"],
+        )
+        return EXIT_ENDPOINT_UNAVAILABLE
+
+    total_bytes = capacity.get("total_bytes")
+    used_bytes = capacity.get("used_bytes")
+    available_bytes = capacity.get("available_bytes")
+    utilization_percent = capacity.get(
+        "utilization_percent"
+    )
+
+    numeric_values = (
+        total_bytes,
+        used_bytes,
+        available_bytes,
+        utilization_percent,
+    )
+
+    if any(
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        for value in numeric_values
+    ):
+        errors.append(
+            "capacity response contains invalid numeric fields"
+        )
+    else:
+        if total_bytes <= 0:
+            errors.append(
+                "capacity total_bytes must be greater than zero"
+            )
+
+        if used_bytes < 0:
+            errors.append(
+                "capacity used_bytes must not be negative"
+            )
+
+        if available_bytes < 0:
+            errors.append(
+                "capacity available_bytes must not be negative"
+            )
+
+        if not 0 <= utilization_percent <= 100:
+            errors.append(
+                "capacity utilization_percent is outside 0 to 100"
+            )
+
+        if total_bytes > 0:
+            expected_available = total_bytes - used_bytes
+
+            if available_bytes != expected_available:
+                errors.append(
+                    "capacity byte values are inconsistent"
+                )
+
+    if errors:
+        emit(
+            output_format,
+            "capacity",
+            "FAIL",
+            EXIT_DEPENDENCY_UNAVAILABLE,
+            data,
+            errors,
+        )
+        return EXIT_DEPENDENCY_UNAVAILABLE
+
+    try:
+        metric_http_status, metric_payload = (
+            prometheus_query(
+                CAPACITY_METRIC_QUERY,
+                timeout,
+            )
+        )
+    except Exception as exc:
+        emit(
+            output_format,
+            "capacity",
+            "FAIL",
+            EXIT_ENDPOINT_UNAVAILABLE,
+            data,
+            [f"Prometheus capacity query failed: {exc}"],
+        )
+        return EXIT_ENDPOINT_UNAVAILABLE
+
+    data["metric_http_status"] = metric_http_status
+
+    if metric_http_status != 200:
+        emit(
+            output_format,
+            "capacity",
+            "FAIL",
+            EXIT_ENDPOINT_UNAVAILABLE,
+            data,
+            [
+                "Prometheus capacity query endpoint "
+                f"returned HTTP {metric_http_status}"
+            ],
+        )
+        return EXIT_ENDPOINT_UNAVAILABLE
+
+    try:
+        results = metric_payload["data"]["result"]
+
+        if len(results) != 1:
+            raise ValueError(
+                "expected exactly one capacity metric result"
+            )
+
+        raw_metric_value = results[0]["value"][1]
+        metric_utilization = float(raw_metric_value)
+    except (
+        KeyError,
+        IndexError,
+        TypeError,
+        ValueError,
+    ) as exc:
+        emit(
+            output_format,
+            "capacity",
+            "FAIL",
+            EXIT_METRIC_VALIDATION_FAILURE,
+            data,
+            [f"capacity metric validation failed: {exc}"],
+        )
+        return EXIT_METRIC_VALIDATION_FAILURE
+
+    data["metric_utilization_percent"] = (
+        metric_utilization
+    )
+
+    if not 0 <= metric_utilization <= 100:
+        emit(
+            output_format,
+            "capacity",
+            "FAIL",
+            EXIT_METRIC_VALIDATION_FAILURE,
+            data,
+            ["capacity metric is outside 0 to 100"],
+        )
+        return EXIT_METRIC_VALIDATION_FAILURE
+
+    difference = abs(
+        metric_utilization - utilization_percent
+    )
+
+    data["utilization_difference"] = difference
+
+    if difference > 0.1:
+        emit(
+            output_format,
+            "capacity",
+            "FAIL",
+            EXIT_METRIC_VALIDATION_FAILURE,
+            data,
+            [
+                "capacity API and Prometheus utilization "
+                "values differ by more than 0.1"
+            ],
+        )
+        return EXIT_METRIC_VALIDATION_FAILURE
+
+    emit(
+        output_format,
+        "capacity",
+        "PASS",
+        EXIT_SUCCESS,
+        data,
+        [],
+    )
+
+    return EXIT_SUCCESS
+
+
+def command_alerts(
+    output_format: str,
+    timeout: float,
+) -> int:
+    data: dict[str, Any] = {}
+
+    try:
+        http_status, payload = http_json(
+            PROMETHEUS_ALERTS_URL,
+            timeout,
+        )
+    except Exception as exc:
+        emit(
+            output_format,
+            "alerts",
+            "FAIL",
+            EXIT_ENDPOINT_UNAVAILABLE,
+            data,
+            [f"Prometheus alerts request failed: {exc}"],
+        )
+        return EXIT_ENDPOINT_UNAVAILABLE
+
+    data["http_status"] = http_status
+
+    if http_status != 200:
+        emit(
+            output_format,
+            "alerts",
+            "FAIL",
+            EXIT_ENDPOINT_UNAVAILABLE,
+            data,
+            [
+                "Prometheus alerts endpoint returned "
+                f"HTTP {http_status}"
+            ],
+        )
+        return EXIT_ENDPOINT_UNAVAILABLE
+
+    try:
+        if payload.get("status") != "success":
+            raise ValueError(
+                "Prometheus response status is not success"
+            )
+
+        alerts = payload["data"]["alerts"]
+
+        if not isinstance(alerts, list):
+            raise TypeError(
+                "Prometheus alerts field is not a list"
+            )
+
+        pending_alerts = []
+        firing_alerts = []
+
+        for alert in alerts:
+            if not isinstance(alert, dict):
+                raise TypeError(
+                    "alert entry is not an object"
+                )
+
+            state = alert.get("state")
+
+            if state == "pending":
+                pending_alerts.append(alert)
+            elif state == "firing":
+                firing_alerts.append(alert)
+            else:
+                raise ValueError(
+                    f"unsupported alert state: {state}"
+                )
+
+    except (
+        KeyError,
+        TypeError,
+        ValueError,
+    ) as exc:
+        data["raw_response"] = payload
+
+        emit(
+            output_format,
+            "alerts",
+            "FAIL",
+            EXIT_ALERT_VALIDATION_FAILURE,
+            data,
+            [f"alert response validation failed: {exc}"],
+        )
+        return EXIT_ALERT_VALIDATION_FAILURE
+
+    data["alert_count"] = len(alerts)
+    data["pending_count"] = len(pending_alerts)
+    data["firing_count"] = len(firing_alerts)
+    data["alerts"] = alerts
+
+    if firing_alerts:
+        data["alert_summary"] = "firing alerts present"
+    elif pending_alerts:
+        data["alert_summary"] = "pending alerts present"
+    else:
+        data["alert_summary"] = "no active alerts"
+
+    emit(
+        output_format,
+        "alerts",
+        "PASS",
+        EXIT_SUCCESS,
+        data,
+        [],
+    )
+
+    return EXIT_SUCCESS
+
+
+def _summary_datetime(value: datetime | None) -> str | None:
+    if value is None:
+        return None
+
+    return value.astimezone(timezone.utc).isoformat().replace(
+        "+00:00",
+        "Z",
+    )
+
+
+def command_collection_summary(output_format: str) -> int:
+    try:
+        summary = read_scheduled_collection_operational_summary()
+        data = {
+            "latest_run_id": summary.latest_run_id,
+            "latest_run_status": summary.latest_run_status,
+            "latest_run_started_at": _summary_datetime(
+                summary.latest_run_started_at
+            ),
+            "latest_run_completed_at": _summary_datetime(
+                summary.latest_run_completed_at
+            ),
+            "last_success_at": _summary_datetime(summary.last_success_at),
+            "last_failure_at": _summary_datetime(summary.last_failure_at),
+            "consecutive_failures": summary.consecutive_failures,
+            "timer_enabled": summary.timer_enabled,
+            "timer_active": summary.timer_active,
+            "next_trigger": _summary_datetime(summary.next_trigger),
+            "collection_health": summary.collection_health.value,
+        }
+
+        emit(
+            output_format,
+            "collection-summary",
+            "PASS",
+            EXIT_SUCCESS,
+            data,
+            [],
+            contract_version="1",
+        )
+        return EXIT_SUCCESS
+    except Exception as exc:
+        diagnostic = " ".join(str(exc).split())[:200]
+        emit(
+            output_format,
+            "collection-summary",
+            "FAIL",
+            EXIT_UNEXPECTED,
+            {},
+            [f"operational summary inspection failed: {diagnostic}"],
+            contract_version="1",
+        )
+        return EXIT_UNEXPECTED
+
+
+def run_verify_check(
+    command: str,
+    timeout: float,
+) -> tuple[int, dict[str, Any]]:
+    executable = Path(__file__).resolve()
+
+    try:
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(executable),
+                "--format",
+                "json",
+                "--timeout",
+                str(timeout),
+                command,
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout + 1.0,
+        )
+    except subprocess.TimeoutExpired as exc:
+        return (
+            EXIT_TIMEOUT,
+            {
+                "command": command,
+                "result": "FAIL",
+                "exit_code": EXIT_TIMEOUT,
+                "errors": [
+                    f"verification check timed out: {exc}"
+                ],
+                "data": {},
+            },
+        )
+    except OSError as exc:
+        return (
+            EXIT_UNEXPECTED,
+            {
+                "command": command,
+                "result": "FAIL",
+                "exit_code": EXIT_UNEXPECTED,
+                "errors": [
+                    f"verification check execution failed: {exc}"
+                ],
+                "data": {},
+            },
+        )
+
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        return (
+            EXIT_UNEXPECTED,
+            {
+                "command": command,
+                "result": "FAIL",
+                "exit_code": EXIT_UNEXPECTED,
+                "errors": [
+                    "verification check returned invalid JSON: "
+                    f"{exc}"
+                ],
+                "data": {
+                    "stdout": result.stdout,
+                    "stderr": result.stderr,
+                },
+            },
+        )
+
+    return result.returncode, payload
+
+
+def command_verify(
+    output_format: str,
+    timeout: float,
+) -> int:
+    check_names = (
+        "status",
+        "health",
+        "capacity",
+        "alerts",
+    )
+
+    checks: dict[str, dict[str, Any]] = {}
+    errors: list[str] = []
+    final_exit_code = EXIT_SUCCESS
+
+    for check_name in check_names:
+        exit_code, payload = run_verify_check(
+            check_name,
+            timeout,
+        )
+
+        checks[check_name] = {
+            "result": payload.get("result"),
+            "exit_code": exit_code,
+            "data": payload.get("data", {}),
+            "errors": payload.get("errors", []),
+        }
+
+        if exit_code != EXIT_SUCCESS:
+            final_exit_code = exit_code
+
+            errors.append(
+                f"{check_name} verification failed "
+                f"with exit code {exit_code}"
+            )
+
+            break
+
+    completed_count = len(checks)
+    passed_count = sum(
+        1
+        for check in checks.values()
+        if (
+            check.get("result") == "PASS"
+            and check.get("exit_code") == 0
+        )
+    )
+
+    data: dict[str, Any] = {
+        "check_order": list(check_names),
+        "checks": checks,
+        "completed_count": completed_count,
+        "passed_count": passed_count,
+        "required_count": len(check_names),
+        "read_only": True,
+    }
+
+    if errors:
+        emit(
+            output_format,
+            "verify",
+            "FAIL",
+            final_exit_code,
+            data,
+            errors,
+        )
+        return final_exit_code
+
+    emit(
+        output_format,
+        "verify",
+        "PASS",
+        EXIT_SUCCESS,
+        data,
+        [],
+    )
+
+    return EXIT_SUCCESS
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="storageops-ops"
+    )
+
+    parser.add_argument(
+        "--format",
+        choices=("text", "json"),
+        default="text",
+    )
+
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        default=5.0,
+    )
+
+    parser.add_argument(
+        "--version",
+        action="store_true",
+    )
+
+    parser.add_argument(
+        "--evidence-dir",
+        default=str(DEFAULT_EVIDENCE_DIR),
+    )
+
+    parser.add_argument(
+        "--no-evidence",
+        action="store_true",
+    )
+
+    parser.add_argument(
+        "--lock-file",
+        default=str(DEFAULT_COLLECT_LOCK_FILE),
+    )
+
+    parser.add_argument(
+        "command",
+        nargs="?",
+        choices=(
+            "version",
+            "status",
+            "health",
+            "collect",
+            "capacity",
+            "alerts",
+            "collection-summary",
+            "verify",
+        ),
+    )
+
+    return parser
+
+
+def main() -> int:
+    parser = build_parser()
+    args = parser.parse_args()
+
+    if args.timeout <= 0:
+        parser.error("--timeout must be greater than zero")
+
+    if args.version:
+        return command_version(args.format)
+
+    if args.command == "version":
+        return command_version(args.format)
+
+    if args.command == "status":
+        return command_status(args.format)
+
+    if args.command == "health":
+        return command_health(
+            args.format,
+            args.timeout,
+        )
+
+    if args.command == "collect":
+        return command_collect(
+            args.format,
+            args.timeout,
+            Path(args.evidence_dir),
+            args.no_evidence,
+            Path(args.lock_file),
+        )
+
+    if args.command == "capacity":
+        return command_capacity(
+            args.format,
+            args.timeout,
+        )
+
+    if args.command == "alerts":
+        return command_alerts(
+            args.format,
+            args.timeout,
+        )
+
+    if args.command == "collection-summary":
+        return command_collection_summary(args.format)
+
+    if args.command == "verify":
+        return command_verify(
+            args.format,
+            args.timeout,
+        )
+
+    parser.print_help()
+    return EXIT_SUCCESS
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except KeyboardInterrupt:
+        raise SystemExit(130)
+    except Exception as exc:
+        print(
+            f"ERROR=unexpected execution failure: {exc}",
+            file=sys.stderr,
+        )
+        print("RESULT=FAIL", file=sys.stderr)
+        print("EXIT_CODE=100", file=sys.stderr)
+        raise SystemExit(EXIT_UNEXPECTED)

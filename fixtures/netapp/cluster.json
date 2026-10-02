@@ -1,0 +1,7 @@
+{
+  "uuid": "cluster-demo-001",
+  "name": "ONTAP-LAB-01",
+  "version": "9.19.1",
+  "state": "online",
+  "location": "Tokyo-Lab"
+}

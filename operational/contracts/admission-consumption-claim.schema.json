@@ -1,0 +1,114 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:storageops:governance:admission-consumption-claim:1",
+  "title": "StorageOps Admission Consumption Claim",
+  "description": "Machine-validatable immutable record of a successful authorization-admission consumption claim. Schema validity does not prove atomic first-claim semantics and does not prove runtime execution.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "claim_id",
+    "authority_material_id",
+    "authority_material_file",
+    "authority_material_sha256",
+    "execution_request_id",
+    "admission_id",
+    "decision_enforcement_id",
+    "certification_id",
+    "lineage_id",
+    "subject_identity",
+    "action",
+    "scope",
+    "runtime_target",
+    "decision_enforcement_sha256",
+    "authorization_admission_sha256",
+    "claimed_at",
+    "claim_state"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "const": 1
+    },
+    "claim_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "authority_material_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "authority_material_file": {
+      "type": "string",
+      "minLength": 1
+    },
+    "authority_material_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "execution_request_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "admission_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "decision_enforcement_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "certification_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "lineage_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "subject_identity": {
+      "type": "string",
+      "minLength": 1
+    },
+    "action": {
+      "type": "string",
+      "minLength": 1
+    },
+    "scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "target"
+      ],
+      "properties": {
+        "target": {
+          "type": "string",
+          "minLength": 1
+        },
+        "parameters": {
+          "type": "object"
+        }
+      }
+    },
+    "runtime_target": {
+      "type": "string",
+      "minLength": 1
+    },
+    "decision_enforcement_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "authorization_admission_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "claimed_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "claim_state": {
+      "type": "string",
+      "const": "CLAIMED"
+    }
+  }
+}

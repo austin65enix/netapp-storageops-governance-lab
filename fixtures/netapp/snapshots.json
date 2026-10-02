@@ -1,0 +1,23 @@
+[
+  {
+    "uuid": "snap-001",
+    "name": "daily.2026-07-30",
+    "volume_uuid": "vol-001",
+    "created_time": "2026-07-30T01:00:00+08:00",
+    "size_bytes": 5368709120
+  },
+  {
+    "uuid": "snap-002",
+    "name": "daily.2026-07-29",
+    "volume_uuid": "vol-001",
+    "created_time": "2026-07-29T01:00:00+08:00",
+    "size_bytes": 4294967296
+  },
+  {
+    "uuid": "snap-003",
+    "name": "before-upgrade",
+    "volume_uuid": "vol-002",
+    "created_time": "2026-07-28T22:00:00+08:00",
+    "size_bytes": 8589934592
+  }
+]

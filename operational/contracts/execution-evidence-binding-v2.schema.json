@@ -1,0 +1,129 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:storageops:governance:execution-evidence-binding:2",
+  "title": "Operational Automation Governance Execution Evidence Binding Record v2",
+  "description": "Machine-validatable governance binding from decision enforcement, authorization admission, and a qualified admission-consumption claim to an existing StorageOps runtime execution evidence document.",
+  "$comment": "This schema does not replace or rewrite the existing runtime execution evidence contract. The sha256 value binds the referenced evidence file bytes to this governance record.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "binding_id",
+    "certification_id",
+    "lineage_id",
+    "decision_enforcement_id",
+    "admission_id",
+    "subject_identity",
+    "runtime_adapter_id",
+    "action",
+    "authority_consumption_reference",
+    "execution_reference",
+    "execution_result",
+    "binding_state",
+    "created_at"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "const": 2
+    },
+    "binding_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "certification_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "lineage_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "decision_enforcement_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "admission_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "subject_identity": {
+      "type": "string",
+      "minLength": 1
+    },
+    "runtime_adapter_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "action": {
+      "type": "string",
+      "minLength": 1
+    },
+    "execution_reference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "execution_id",
+        "evidence_file",
+        "evidence_schema_version",
+        "sha256"
+      ],
+      "properties": {
+        "execution_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "evidence_file": {
+          "type": "string",
+          "minLength": 1
+        },
+        "evidence_schema_version": {
+          "type": "integer",
+          "const": 1
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "execution_result": {
+      "type": "string",
+      "enum": [
+        "PASS",
+        "FAIL"
+      ]
+    },
+    "binding_state": {
+      "type": "string",
+      "const": "BOUND"
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "authority_consumption_reference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "claim_id",
+        "claim_file",
+        "claim_sha256"
+      ],
+      "properties": {
+        "claim_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "claim_file": {
+          "type": "string",
+          "minLength": 1
+        },
+        "claim_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    }
+  }
+}

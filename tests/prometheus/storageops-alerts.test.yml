@@ -1,0 +1,86 @@
+rule_files:
+  - storageops-alerts.yml
+
+evaluation_interval: 1m
+
+tests:
+  - name: storageops-target-down
+    interval: 1m
+    input_series:
+      - series: up{job="storageops-api",instance="127.0.0.1:8100"}
+        values: 0x3
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: StorageOpsTargetDown
+        exp_alerts:
+          - exp_labels:
+              alertname: StorageOpsTargetDown
+              instance: 127.0.0.1:8100
+              job: storageops-api
+              service: storageops-api
+              severity: critical
+            exp_annotations:
+              summary: StorageOps API target is down
+              description: Prometheus cannot scrape the StorageOps API target for more than one minute.
+
+  - name: ontap-down
+    interval: 1m
+    input_series:
+      - series: storageops_ontap_up{job="storageops-api",source="ONTAP-LAB-01"}
+        values: 0x3
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: StorageOpsOntapDown
+        exp_alerts:
+          - exp_labels:
+              alertname: StorageOpsOntapDown
+              dependency: ontap
+              job: storageops-api
+              service: storageops-api
+              severity: critical
+              source: ONTAP-LAB-01
+            exp_annotations:
+              summary: ONTAP dependency is unavailable
+              description: StorageOps has reported the configured ONTAP source as unavailable for more than one minute.
+
+  - name: aggregate-capacity-high
+    interval: 1m
+    input_series:
+      - series: storageops_capacity_bytes{job="storageops-api",category="used",source="ONTAP-LAB-01"}
+        values: 90x8
+      - series: storageops_capacity_bytes{job="storageops-api",category="total",source="ONTAP-LAB-01"}
+        values: 100x8
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: StorageOpsCapacityHigh
+        exp_alerts:
+          - exp_labels:
+              alertname: StorageOpsCapacityHigh
+              job: storageops-api
+              service: storageops-api
+              severity: warning
+              source: ONTAP-LAB-01
+            exp_annotations:
+              summary: Aggregate storage utilization is high
+              description: Aggregate used capacity has remained above 80 percent for more than five minutes.
+
+  - name: volume-utilization-high
+    interval: 1m
+    input_series:
+      - series: storageops_volume_utilization_percent{job="storageops-api",source="ONTAP-LAB-01",svm="svm-001",volume="vol-hot"}
+        values: 90x8
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: StorageOpsVolumeUtilizationHigh
+        exp_alerts:
+          - exp_labels:
+              alertname: StorageOpsVolumeUtilizationHigh
+              job: storageops-api
+              service: storageops-api
+              severity: warning
+              source: ONTAP-LAB-01
+              svm: svm-001
+              volume: vol-hot
+            exp_annotations:
+              summary: Storage volume utilization is high
+              description: Volume vol-hot on SVM svm-001 has remained above 80 percent utilization for more than five minutes.

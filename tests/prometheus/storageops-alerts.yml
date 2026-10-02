@@ -1,0 +1,70 @@
+groups:
+  - name: storageops-availability
+    rules:
+      - alert: StorageOpsTargetDown
+        expr: up{job="storageops-api"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          service: storageops-api
+        annotations:
+          summary: StorageOps API target is down
+          description: Prometheus cannot scrape the StorageOps API target for more than one minute.
+
+      - alert: StorageOpsOntapDown
+        expr: storageops_ontap_up{job="storageops-api"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          service: storageops-api
+          dependency: ontap
+        annotations:
+          summary: ONTAP dependency is unavailable
+          description: StorageOps has reported the configured ONTAP source as unavailable for more than one minute.
+
+  - name: storageops-api-errors
+    rules:
+      - alert: StorageOpsApi5xxDetected
+        expr: increase(storageops_http_responses_total{job="storageops-api",status_code=~"5.."}[5m]) > 0
+        for: 1m
+        labels:
+          severity: warning
+          service: storageops-api
+        annotations:
+          summary: StorageOps API returned a server error
+          description: At least one StorageOps HTTP 5xx response was observed during the last five minutes.
+
+  - name: storageops-capacity
+    rules:
+      - alert: StorageOpsCapacityHigh
+        expr: storageops_capacity_bytes{job="storageops-api",category="used"} / ignoring(category) storageops_capacity_bytes{job="storageops-api",category="total"} > 0.80
+        for: 5m
+        labels:
+          severity: warning
+          service: storageops-api
+        annotations:
+          summary: Aggregate storage utilization is high
+          description: Aggregate used capacity has remained above 80 percent for more than five minutes.
+
+      - alert: StorageOpsVolumeUtilizationHigh
+        expr: storageops_volume_utilization_percent{job="storageops-api"} > 80
+        for: 5m
+        labels:
+          severity: warning
+          service: storageops-api
+        annotations:
+          summary: Storage volume utilization is high
+          description: Volume {{ $labels.volume }} on SVM {{ $labels.svm }} has remained above 80 percent utilization for more than five minutes.
+
+  - name: storageops-workflows
+    rules:
+      - alert: StorageOpsInventoryCollectionFailure
+        expr: increase(storageops_snapshot_runs_total{job="storageops-api",result="failure"}[10m]) > 0
+        for: 1m
+        labels:
+          severity: warning
+          service: storageops-api
+          workflow: inventory-collection
+        annotations:
+          summary: Storage inventory collection failed
+          description: At least one inventory collection failure was recorded during the last ten minutes.

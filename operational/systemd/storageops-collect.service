@@ -1,0 +1,22 @@
+[Unit]
+Description=StorageOps scheduled inventory collection
+Documentation=file:/opt/netapp-storageops-lab/operational/contracts/scheduled-collection-contract.md
+Requires=storageops-api.service
+After=network-online.target storageops-api.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=atn
+Group=atn
+WorkingDirectory=/opt/netapp-storageops-lab
+ExecStart=/opt/netapp-storageops-lab/scripts/storageops-ops --format json --timeout 30 --evidence-dir /opt/netapp-storageops-lab/evidence/runtime --lock-file /run/lock/storageops-collect.lock collect
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=storageops-collect
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/opt/netapp-storageops-lab/evidence /opt/netapp-storageops-lab/snapshots /run/lock
+UMask=0027

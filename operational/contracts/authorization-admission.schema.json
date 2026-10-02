@@ -1,0 +1,130 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:storageops:governance:authorization-admission:1",
+  "title": "Operational Automation Governance Authorization Admission Record v1",
+  "description": "Machine-validatable reference contract for the final governance admission boundary before runtime. Admission is distinct from execution.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "admission_id",
+    "execution_request_id",
+    "decision_enforcement_id",
+    "certification_id",
+    "lineage_id",
+    "subject_identity",
+    "action",
+    "scope",
+    "runtime_target",
+    "admission_state",
+    "created_at",
+    "expires_at",
+    "evidence_reference"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "const": 1
+    },
+    "admission_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "execution_request_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "decision_enforcement_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "certification_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "lineage_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "subject_identity": {
+      "type": "string",
+      "minLength": 1
+    },
+    "action": {
+      "type": "string",
+      "minLength": 1
+    },
+    "scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "target"
+      ],
+      "properties": {
+        "target": {
+          "type": "string",
+          "minLength": 1
+        },
+        "parameters": {
+          "type": "object"
+        }
+      }
+    },
+    "runtime_target": {
+      "type": "string",
+      "minLength": 1
+    },
+    "admission_state": {
+      "type": "string",
+      "enum": [
+        "ADMITTED",
+        "PENDING",
+        "DENIED"
+      ]
+    },
+    "reason_code": {
+      "type": "string",
+      "enum": [
+        "DECISION_NOT_ACCEPTED",
+        "CERTIFICATION_INVALID",
+        "LINEAGE_MISMATCH",
+        "SCOPE_MISMATCH",
+        "TARGET_MISMATCH",
+        "EXPIRED_AUTHORIZATION",
+        "POLICY_VIOLATION",
+        "REVIEW_REQUIRED"
+      ]
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "expires_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "evidence_reference": {
+      "type": "string",
+      "minLength": 1
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "admission_state": {
+            "const": "DENIED"
+          }
+        },
+        "required": [
+          "admission_state"
+        ]
+      },
+      "then": {
+        "required": [
+          "reason_code"
+        ]
+      }
+    }
+  ]
+}

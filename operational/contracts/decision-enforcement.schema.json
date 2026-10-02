@@ -1,0 +1,89 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:storageops:governance:decision-enforcement:1",
+  "title": "Operational Automation Governance Decision Enforcement Record v1",
+  "description": "Machine-validatable reference contract for a governance decision enforcement record. An accepted decision is not itself execution authorization.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "enforcement_id",
+    "decision_id",
+    "policy_evaluation_id",
+    "certification_id",
+    "lineage_id",
+    "subject_identity",
+    "action",
+    "scope",
+    "enforcement_state",
+    "created_at",
+    "evidence_reference"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "const": 1
+    },
+    "enforcement_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "decision_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "policy_evaluation_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "certification_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "lineage_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "subject_identity": {
+      "type": "string",
+      "minLength": 1
+    },
+    "action": {
+      "type": "string",
+      "minLength": 1
+    },
+    "scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "target"
+      ],
+      "properties": {
+        "target": {
+          "type": "string",
+          "minLength": 1
+        },
+        "parameters": {
+          "type": "object"
+        }
+      }
+    },
+    "enforcement_state": {
+      "type": "string",
+      "enum": [
+        "ACCEPTED",
+        "HOLD",
+        "REJECTED",
+        "BLOCKED"
+      ]
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "evidence_reference": {
+      "type": "string",
+      "minLength": 1
+    }
+  }
+}

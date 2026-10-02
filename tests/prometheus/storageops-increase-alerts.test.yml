@@ -1,0 +1,48 @@
+rule_files:
+  - storageops-alerts.yml
+
+evaluation_interval: 1m
+
+tests:
+  - name: storageops-api-5xx-detected
+    interval: 1m
+    input_series:
+      - series: storageops_http_responses_total{job="storageops-api",instance="127.0.0.1:8100",method="GET",endpoint="/api/storage/volumes",status_code="502"}
+        values: 0 1 1 1
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: StorageOpsApi5xxDetected
+        exp_alerts:
+          - exp_labels:
+              alertname: StorageOpsApi5xxDetected
+              endpoint: /api/storage/volumes
+              instance: 127.0.0.1:8100
+              job: storageops-api
+              method: GET
+              service: storageops-api
+              severity: warning
+              status_code: 502
+            exp_annotations:
+              summary: StorageOps API returned a server error
+              description: At least one StorageOps HTTP 5xx response was observed during the last five minutes.
+
+  - name: storageops-inventory-collection-failure
+    interval: 1m
+    input_series:
+      - series: storageops_snapshot_runs_total{job="storageops-api",instance="127.0.0.1:8100",result="failure"}
+        values: 0 1 1 1
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: StorageOpsInventoryCollectionFailure
+        exp_alerts:
+          - exp_labels:
+              alertname: StorageOpsInventoryCollectionFailure
+              instance: 127.0.0.1:8100
+              job: storageops-api
+              result: failure
+              service: storageops-api
+              severity: warning
+              workflow: inventory-collection
+            exp_annotations:
+              summary: Storage inventory collection failed
+              description: At least one inventory collection failure was recorded during the last ten minutes.

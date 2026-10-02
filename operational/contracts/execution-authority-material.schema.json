@@ -1,0 +1,136 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:storageops:governance:execution-authority-material:1",
+  "title": "StorageOps Execution Authority Material",
+  "description": "Machine-validatable immutable reference bundle that binds already-issued decision enforcement and authorization admission bytes to issuer-bound expected runtime context. This artifact does not create authorization or dispatch execution.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "authority_material_id",
+    "issuer_identity",
+    "issued_at",
+    "decision_enforcement_reference",
+    "authorization_admission_reference",
+    "expected_context"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "const": 1
+    },
+    "authority_material_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "issuer_identity": {
+      "type": "string",
+      "minLength": 1
+    },
+    "issued_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "decision_enforcement_reference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "record_file",
+        "sha256"
+      ],
+      "properties": {
+        "record_file": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "authorization_admission_reference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "record_file",
+        "sha256"
+      ],
+      "properties": {
+        "record_file": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "expected_context": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "enforcement_id",
+        "admission_id",
+        "execution_request_id",
+        "certification_id",
+        "lineage_id",
+        "subject_identity",
+        "action",
+        "scope",
+        "runtime_target"
+      ],
+      "properties": {
+        "enforcement_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "admission_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "execution_request_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "certification_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "lineage_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "subject_identity": {
+          "type": "string",
+          "minLength": 1
+        },
+        "action": {
+          "type": "string",
+          "minLength": 1
+        },
+        "scope": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "target"
+          ],
+          "properties": {
+            "target": {
+              "type": "string",
+              "minLength": 1
+            },
+            "parameters": {
+              "type": "object"
+            }
+          }
+        },
+        "runtime_target": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    }
+  }
+}

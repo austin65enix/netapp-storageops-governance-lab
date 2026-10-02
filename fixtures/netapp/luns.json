@@ -1,0 +1,18 @@
+[
+  {
+    "uuid": "lun-001",
+    "name": "db-lun-01",
+    "volume_uuid": "vol-002",
+    "size_bytes": 107374182400,
+    "os_type": "linux",
+    "state": "online"
+  },
+  {
+    "uuid": "lun-002",
+    "name": "erp-lun-01",
+    "volume_uuid": "vol-002",
+    "size_bytes": 53687091200,
+    "os_type": "windows",
+    "state": "online"
+  }
+]

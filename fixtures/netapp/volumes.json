@@ -1,0 +1,35 @@
+[
+  {
+    "uuid": "vol-001",
+    "name": "vol_business_data",
+    "svm_uuid": "svm-001",
+    "state": "online",
+    "protocol": "nfs",
+    "size_bytes": 107374182400,
+    "used_bytes": 64424509440,
+    "available_bytes": 42949672960,
+    "snapshot_reserved_percent": 5
+  },
+  {
+    "uuid": "vol-002",
+    "name": "vol_database",
+    "svm_uuid": "svm-001",
+    "state": "online",
+    "protocol": "iscsi",
+    "size_bytes": 214748364800,
+    "used_bytes": 107374182400,
+    "available_bytes": 107374182400,
+    "snapshot_reserved_percent": 10
+  },
+  {
+    "uuid": "vol-003",
+    "name": "vol_backup",
+    "svm_uuid": "svm-002",
+    "state": "online",
+    "protocol": "nfs",
+    "size_bytes": 536870912000,
+    "used_bytes": 214748364800,
+    "available_bytes": 322122547200,
+    "snapshot_reserved_percent": 5
+  }
+]

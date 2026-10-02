@@ -1,0 +1,11 @@
+[
+  {
+    "uuid": "svm-001",
+    "name": "svm-production",
+    "protocols": [
+      "nfs",
+      "iscsi"
+    ],
+    "state": "running"
+  }
+]

@@ -1,0 +1,13 @@
+[Unit]
+Description=Run StorageOps inventory collection every 15 minutes
+Documentation=file:/opt/netapp-storageops-lab/operational/contracts/scheduled-collection-contract.md
+
+[Timer]
+Unit=storageops-collect.service
+OnBootSec=5min
+OnUnitActiveSec=15min
+AccuracySec=1min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
